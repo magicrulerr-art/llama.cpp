@@ -2896,13 +2896,23 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
     auto const &rm_id = [&](uint32_t rows) { return is_rdna3_or_4 ? 4u : rows; };
     uint32_t rm_iq = 2 * rm_kq;
 
-    const bool use_subgroups = device->subgroup_arithmetic;
+    // AURA-005 (2026-10-27): the Adreno proprietary driver faults the dequant
+    // mul_mat_vec pipelines that force a >=16 subgroup size — vkCreateComputePipeline
+    // returns ErrorUnknown for "mul_mat_vec_q4_k_f32_f32" on Adreno 830 (Fold),
+    // naming captured over the stderr socket. Env-gated exactly like the existing
+    // knobs so one build A/B's the fix via debug.moxw.vk_flags=subgroup16 (or
+    // =subgroup for the wider hammer); no env set = upstream behaviour. Make
+    // unconditional for VK_VENDOR_ID_QUALCOMM once the fleet confirms.
+    const bool qcom_subgroup_aversion = device->vendor_id == VK_VENDOR_ID_QUALCOMM;
+    const bool use_subgroups = device->subgroup_arithmetic &&
+        !(qcom_subgroup_aversion && getenv("GGML_VK_DISABLE_SUBGROUP"));
     // The Imagination proprietary compiler rejects the subgroup-only dequant mul_mat_vec
     // shaders that require a subgroup size >= 16; fall back to shared-memory reduction.
     const bool is_imagination_proprietary =
         device->driver_id == vk::DriverId::eImaginationProprietary;
     // Ensure a subgroup size >= 16 is available
-    const bool use_subgroups16 = use_subgroups && subgroup_min_size_16 && !is_imagination_proprietary;
+    const bool use_subgroups16 = use_subgroups && subgroup_min_size_16 && !is_imagination_proprietary &&
+        !(qcom_subgroup_aversion && getenv("GGML_VK_DISABLE_SUBGROUP16"));
 
     const uint32_t subgroup_size = (device->vendor_id == VK_VENDOR_ID_INTEL && device->subgroup_size_control && device->subgroup_min_size <= 16 && device->subgroup_max_size >= 16) ? 16 : device->subgroup_size;
     const uint32_t subgroup_size16 = std::max(subgroup_size, 16u);
