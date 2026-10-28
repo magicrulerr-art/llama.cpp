@@ -1855,6 +1855,8 @@ common_peg_parser_id json_parser_id(const common_json & v) {
 common_json parser_id_json(common_peg_parser_id id) {
     return common_json(static_cast<int>(id));
 }
+} // namespace
+
 
 // Member functions rather than free ones: add_parser/add_rule are private, and this
 // is the one place outside the builder that needs to populate an arena from scratch.
@@ -1998,7 +2000,6 @@ void common_peg_arena::from_json(const common_json & in) {
     this->resolve_refs();
 }
 
-} // namespace
 
 std::string common_peg_arena::save() const {
     common_json json;
