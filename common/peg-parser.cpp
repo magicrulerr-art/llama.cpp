@@ -1831,3 +1831,181 @@ common_peg_arena build_peg_parser(const std::function<common_peg_parser(common_p
     builder.set_root(fn(builder));
     return builder.build();
 }
+
+// ---------------------------------------------------------------------------
+// Arena serialization (moxw fork addition, re-derived for the 8ca4060 arena)
+// ---------------------------------------------------------------------------
+//
+// Upstream never needs this: a process that builds a parser also runs it, so the
+// arena has always lived and died inside one call stack. The JNI boundary splits
+// apply from parse, and the only thing that survives the trip is a byte array —
+// hence a JSON form. The encoding mirrors the parser variant itself: each parser
+// is a two- to four-element array [variant index, ...payload], positional like
+// the structs, with the rule table and root id alongside. Variant indices are
+// fixed by the declaration order of common_peg_parser_variant; upstream reorders
+// that list about as often as it ships a release, which is exactly the moment a
+// bump fails here loudly (out-of-range index) rather than quietly.
+
+namespace {
+
+common_peg_parser_id json_parser_id(const common_json & v) {
+    return static_cast<common_peg_parser_id>(v.get<int>());
+}
+
+common_json parser_id_json(common_peg_parser_id id) {
+    return common_json(static_cast<int>(id));
+}
+
+// Member functions rather than free ones: add_parser/add_rule are private, and this
+// is the one place outside the builder that needs to populate an arena from scratch.
+void common_peg_arena::to_json(common_json & out) const {
+    auto variants = common_json::array();
+    for (size_t i = 0; i < this->size(); i++) {
+        std::visit([&](const auto & p) {
+            using T = std::decay_t<decltype(p)>;
+            common_json row = common_json::array();
+            if constexpr (std::is_same_v<T, common_peg_epsilon_parser>) {
+                row = common_json::array({0 });
+            } else if constexpr (std::is_same_v<T, common_peg_start_parser>) {
+                row = common_json::array({1 });
+            } else if constexpr (std::is_same_v<T, common_peg_end_parser>) {
+                row = common_json::array({2 });
+            } else if constexpr (std::is_same_v<T, common_peg_literal_parser>) {
+                row = common_json::array({3, p.literal });
+            } else if constexpr (std::is_same_v<T, common_peg_sequence_parser>) {
+                row = common_json::array({4 });
+                for (auto child : p.children) {
+                    row.push_back(parser_id_json(child));
+                }
+            } else if constexpr (std::is_same_v<T, common_peg_choice_parser>) {
+                row = common_json::array({5 });
+                for (auto child : p.children) {
+                    row.push_back(parser_id_json(child));
+                }
+            } else if constexpr (std::is_same_v<T, common_peg_repetition_parser>) {
+                row = common_json::array({6, parser_id_json(p.child), p.min_count, p.max_count });
+            } else if constexpr (std::is_same_v<T, common_peg_and_parser>) {
+                row = common_json::array({7, parser_id_json(p.child) });
+            } else if constexpr (std::is_same_v<T, common_peg_not_parser>) {
+                row = common_json::array({8, parser_id_json(p.child) });
+            } else if constexpr (std::is_same_v<T, common_peg_any_parser>) {
+                row = common_json::array({9 });
+            } else if constexpr (std::is_same_v<T, common_peg_space_parser>) {
+                row = common_json::array({10 });
+            } else if constexpr (std::is_same_v<T, common_peg_chars_parser>) {
+                // Ranges are derived from the pattern by the builder; the pattern is the
+                // lossless form, so it travels alone and load() re-parses it.
+                row = common_json::array({11, p.pattern, p.min_count, p.max_count });
+            } else if constexpr (std::is_same_v<T, common_peg_string_parser>) {
+                row = common_json::array({12, std::string(1, p.delimiter) });
+            } else if constexpr (std::is_same_v<T, common_peg_until_parser>) {
+                row = common_json::array({13, p.delimiters });
+            } else if constexpr (std::is_same_v<T, common_peg_schema_parser>) {
+                row = common_json::array({14, parser_id_json(p.child), p.name, p.raw });
+            } else if constexpr (std::is_same_v<T, common_peg_rule_parser>) {
+                row = common_json::array({15, p.name, parser_id_json(p.child), p.trigger });
+            } else if constexpr (std::is_same_v<T, common_peg_ref_parser>) {
+                row = common_json::array({16, p.name });
+            } else if constexpr (std::is_same_v<T, common_peg_atomic_parser>) {
+                row = common_json::array({17, parser_id_json(p.child) });
+            } else if constexpr (std::is_same_v<T, common_peg_tag_parser>) {
+                row = common_json::array({18, parser_id_json(p.child), p.tag });
+            } else if constexpr (std::is_same_v<T, common_peg_gbnf_parser>) {
+                row = common_json::array({19, parser_id_json(p.child), p.grammar });
+            } else if constexpr (std::is_same_v<T, common_peg_ac_parser>) {
+                row = common_json::array({20, parser_id_json(p.child), p.delimiters });
+            } else {
+                static_assert(is_always_false_v<T>, "peg arena save: unhandled parser variant");
+            }
+            variants.push_back(std::move(row));
+        }, this->get(i));
+    }
+    auto rules = common_json::object();
+    for (const auto & rule : this->rules()) {
+        rules[rule.first] = parser_id_json(rule.second);
+    }
+    // common_json is not nlohmann: a braced pair in value position does not build,
+    // so the top level is filled key by key.
+    out                    = common_json::object();
+    out["parsers"]         = std::move(variants);
+    out["rules"]           = std::move(rules);
+    out["root"]            = parser_id_json(this->root());
+}
+
+void common_peg_arena::from_json(const common_json & in) {
+    for (const auto & row : in.at("parsers")) {
+        const int which = row.at(0).get<int>();
+        switch (which) {
+            case 0:  this->add_parser(common_peg_epsilon_parser{}); break;
+            case 1:  this->add_parser(common_peg_start_parser{}); break;
+            case 2:  this->add_parser(common_peg_end_parser{}); break;
+            case 3:  this->add_parser(common_peg_literal_parser{ row.at(1).get<std::string>() }); break;
+            case 4: {
+                common_peg_sequence_parser seq;
+                for (auto it = row.begin() + 1; it != row.end(); ++it) {
+                    seq.children.push_back(json_parser_id(*it));
+                }
+                this->add_parser(std::move(seq));
+                break;
+            }
+            case 5: {
+                common_peg_choice_parser choice;
+                for (auto it = row.begin() + 1; it != row.end(); ++it) {
+                    choice.children.push_back(json_parser_id(*it));
+                }
+                this->add_parser(std::move(choice));
+                break;
+            }
+            case 6:  this->add_parser(common_peg_repetition_parser{
+                         json_parser_id(row.at(2)), row.at(3).get<int>(), row.at(4).get<int>() }); break;
+            case 7:  this->add_parser(common_peg_and_parser{ json_parser_id(row.at(1)) }); break;
+            case 8:  this->add_parser(common_peg_not_parser{ json_parser_id(row.at(1)) }); break;
+            case 9:  this->add_parser(common_peg_any_parser{}); break;
+            case 10: this->add_parser(common_peg_space_parser{}); break;
+            case 11: {
+                const std::string pattern = row.at(1).get<std::string>();
+                // Same derivation the builder performs, so ranges and pattern agree again.
+                auto [ranges, negated] = parse_char_classes(pattern);
+                this->add_parser(common_peg_chars_parser{ pattern, std::move(ranges), negated,
+                                                         row.at(2).get<int>(), row.at(3).get<int>() });
+                break;
+            }
+            case 12: this->add_parser(common_peg_string_parser{ row.at(1).get<std::string>().at(0) }); break;
+            case 13: this->add_parser(common_peg_until_parser{ row.at(1).get<std::vector<std::string>>() }); break;
+            case 14: this->add_parser(common_peg_schema_parser{
+                         json_parser_id(row.at(1)), row.at(2).get<std::string>(), nullptr, nullptr,
+                         row.at(3).get<bool>() }); break;
+            case 15: this->add_parser(common_peg_rule_parser{
+                         row.at(1).get<std::string>(), json_parser_id(row.at(2)), row.at(3).get<bool>() }); break;
+            case 16: this->add_parser(common_peg_ref_parser{ row.at(1).get<std::string>() }); break;
+            case 17: this->add_parser(common_peg_atomic_parser{ json_parser_id(row.at(1)) }); break;
+            case 18: this->add_parser(common_peg_tag_parser{
+                         json_parser_id(row.at(1)), row.at(2).get<std::string>() }); break;
+            case 19: this->add_parser(common_peg_gbnf_parser{
+                         json_parser_id(row.at(1)), row.at(2).get<std::string>() }); break;
+            case 20: this->add_parser(common_peg_ac_parser{
+                         json_parser_id(row.at(1)), row.at(2).get<std::vector<std::string>>() }); break;
+            default:
+                throw std::runtime_error("peg arena load: unknown parser variant index " + std::to_string(which));
+        }
+    }
+    for (const auto & entry : in.at("rules").items()) {
+        this->add_rule(entry.key(), json_parser_id(entry.value()));
+    }
+    this->set_root(json_parser_id(in.at("root")));
+    // The builder resolves refs on the way out; a loaded arena must come back in the
+    // same state it was saved in, or ref parsers would reach the parser loop unresolved.
+    this->resolve_refs();
+}
+
+} // namespace
+
+std::string common_peg_arena::save() const {
+    common_json json;
+    to_json(json);
+    return json.dump();
+}
+
+void common_peg_arena::load(const common_json & json) {
+    from_json(json);
+}

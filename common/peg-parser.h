@@ -354,6 +354,9 @@ class common_peg_arena {
     common_peg_parser_id root() const { return root_; }
     void set_root(common_peg_parser_id id) { root_ = id; }
 
+    // Named-rule table, exposed for the serialization below (rule name -> rule parser id).
+    const std::unordered_map<std::string, common_peg_parser_id> & rules() const { return rules_; }
+
     common_peg_parse_result parse(common_peg_parse_context & ctx, size_t start = 0) const;
     common_peg_parse_result parse(common_peg_parser_id id, common_peg_parse_context & ctx, size_t start) const;
 
@@ -363,10 +366,23 @@ class common_peg_arena {
 
     std::string dump(common_peg_parser_id id) const;
 
+    // JSON round-trip of the whole arena (parsers, rule table, root) for callers that
+    // build the parser in one native call and consume it in another — the JNI boundary,
+    // where apply and parse are separate calls and nothing but a byte array crosses.
+    // The schema variant keeps its child, name and raw flag; the schema *document* is
+    // grammar-side only (parse delegates straight to the child), so it is not carried.
+    std::string save() const;
+    void load(const common_json & json);
+    void load(const std::string & json) { load(common_json::parse(json)); }
+
     friend class common_peg_parser_builder;
 
   private:
     std::string dump_impl(common_peg_parser_id id, std::set<common_peg_parser_id> & visited) const;
+
+    // Bodies live at the bottom of peg-parser.cpp, beside the save()/load() that wrap them.
+    void to_json(common_json & out) const;
+    void from_json(const common_json & in);
 
     common_peg_parser_id add_parser(common_peg_parser_variant parser);
     void add_rule(const std::string & name, common_peg_parser_id id);
