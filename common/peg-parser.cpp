@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <initializer_list>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <set>
@@ -1944,7 +1945,7 @@ void common_peg_arena::from_json(const common_json & in) {
             case 3:  this->add_parser(common_peg_literal_parser{ row.at(1).get<std::string>() }); break;
             case 4: {
                 common_peg_sequence_parser seq;
-                for (auto it = row.begin() + 1; it != row.end(); ++it) {
+                for (auto it = std::next(row.begin()); it != row.end(); ++it) {
                     seq.children.push_back(json_parser_id(*it));
                 }
                 this->add_parser(std::move(seq));
@@ -1952,7 +1953,7 @@ void common_peg_arena::from_json(const common_json & in) {
             }
             case 5: {
                 common_peg_choice_parser choice;
-                for (auto it = row.begin() + 1; it != row.end(); ++it) {
+                for (auto it = std::next(row.begin()); it != row.end(); ++it) {
                     choice.children.push_back(json_parser_id(*it));
                 }
                 this->add_parser(std::move(choice));
