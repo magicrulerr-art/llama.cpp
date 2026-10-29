@@ -1960,7 +1960,7 @@ void common_peg_arena::from_json(const common_json & in) {
                 break;
             }
             case 6:  this->add_parser(common_peg_repetition_parser{
-                         json_parser_id(row.at(2)), row.at(3).get<int>(), row.at(4).get<int>() }); break;
+                         json_parser_id(row.at(1)), row.at(2).get<int>(), row.at(3).get<int>() }); break;
             case 7:  this->add_parser(common_peg_and_parser{ json_parser_id(row.at(1)) }); break;
             case 8:  this->add_parser(common_peg_not_parser{ json_parser_id(row.at(1)) }); break;
             case 9:  this->add_parser(common_peg_any_parser{}); break;
